@@ -10,11 +10,14 @@
 #define voltage_divider_offset 2.174 
 #define calibration .99
 #define uS_TO_S_FACTOR 1000000
-#define TIME_TO_SLEEP 3600   
+#define TIME_TO_SLEEP 3600
 
 const char* ssid = "REPLACE_WITH_YOUR_SSID";
 const char* password = "REPLACE_WITH_YOUR_PASSWORD";
-const char* mqtt_server = "YOUR_MQTT_BROKER_IP_ADDRESS";
+const char* mqtt_server = "io.adafruit.com";
+const char* mqtt_user = "REPLACE_WITH_YOUR_MQTT_USER";
+const char* mqtt_key = "REPLACE_WITH_YOUR_MQTT_KEY";
+const char* outTopic = "ADAFRUIT_USERNAME/F/outTopic"
 
 WiFiClient espClient;
 PubSubClient client(espClient);
@@ -54,6 +57,13 @@ void setup() {
 
   setup_wifi();
   client.setServer(mqtt_server, 1883);
+  
+  String clientId = "ESP-PoolTempMon-";
+  clientId += String(random(0xffff), HEX);
+  
+  if (MQTTclient.connect(clientId.c_str(), mqtt_user, mqtt_key)) {
+    client.publish(outTopic, "hello world");
+  }
 }
 
 void loop() {
