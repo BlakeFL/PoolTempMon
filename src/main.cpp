@@ -3,87 +3,136 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <PubSubClient.h>
+#include <ArduinoJson.h>
 
-#define GREENLED 5
 #define ONE_WIRE_BUS 2
 #define ADC_PIN 4  
-#define voltage_divider_offset 2.174 
-#define calibration .99
-#define uS_TO_S_FACTOR 1000000
-#define TIME_TO_SLEEP 3600
+#define voltage_divider_offset 2.3050
 
-const char* ssid = "REPLACE_WITH_YOUR_SSID";
-const char* password = "REPLACE_WITH_YOUR_PASSWORD";
-const char* mqtt_server = "io.adafruit.com";
-const char* mqtt_user = "REPLACE_WITH_YOUR_MQTT_USER";
-const char* mqtt_key = "REPLACE_WITH_YOUR_MQTT_KEY";
-const char* outTopic = "ADAFRUIT_USERNAME/F/outTopic"
+const char* ssid = "ssid";
+const char* password = "password";
+const char* mqtt_server = "server";
+const char* mqtt_user = "user";
+const char* mqtt_key = "key";
+const char* outTopicGroup = "topic";
+const unsigned long long updateInterval = 1ULL * 60 * 1000000;  // e.g. 15 * 60 * 1000000; for a 15-Min update interval (15-mins x 60-secs * 1000000uS)
 
 WiFiClient espClient;
 PubSubClient client(espClient);
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensor(&oneWire);
 
-void setup_wifi() {
+bool setup_wifi() 
+{
   delay(10);
   // We start by connecting to a WiFi network
   Serial.println();
   Serial.print("Connecting to ");
   Serial.println(ssid);
-
+  
+  WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
+  Serial.println("Starting WiFi");
+  int attempts = 0;
 
-  while (WiFi.status() != WL_CONNECTED) {
+  while (WiFi.status() != WL_CONNECTED) 
+  {
+    if (attempts > 5)
+    {
+      return false;
+    }
+
     delay(500);
     Serial.print(".");
+    attempts++;
   }
 
   Serial.println("");
   Serial.println("WiFi connected");
   Serial.println("IP address: ");
   Serial.println(WiFi.localIP());
+  return true;
 }
 
-void setup() {
+void setup() 
+{
   Serial.begin(115200);
-  pinMode(GREENLED, OUTPUT);
   Serial.println("Start");
 
+  sensor.begin();
   Serial.println("Dallas Temperature Control Library Demo - TwoPin_DS18B20");
 
-  //esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
-
-  sensor.begin();
-
-  setup_wifi();
-  client.setServer(mqtt_server, 1883);
-  
-  String clientId = "ESP-PoolTempMon-";
-  clientId += String(random(0xffff), HEX);
-  
-  if (MQTTclient.connect(clientId.c_str(), mqtt_user, mqtt_key)) {
-    client.publish(outTopic, "hello world");
-  }
-}
-
-void loop() {
-  //digitalWrite(GREENLED, HIGH);
-  //Serial.println("The green led is ON");
-  //delay(4000);
-  //digitalWrite(GREENLED, LOW);
-  //Serial.println("The green led is OFF");
-  //delay(4000);
   Serial.print("Requesting temperatures...");
   sensor.requestTemperatures();
   Serial.println(" done");
 
-  Serial.print("Pool Temp: ");
-  Serial.println(sensor.getTempCByIndex(0));
+  float tempF = sensor.getTempFByIndex(0);
 
-  float unadjusted_voltage = (analogRead(ADC_PIN) / 4095.0 * 3.3 * voltage_divider_offset) * calibration;
-  Serial.println("Voltage = " + String(unadjusted_voltage,3) + "v");
-  Serial.println();
+  Serial.print("Pool Temp F: ");
+  Serial.println(tempF); 
 
-  delay(1000);
+  long sum = 0;
+  float voltage = 0.0;
+    
+  for (int i = 0; i < 500; i++)
+  {
+    sum += analogRead(ADC_PIN);
+    delayMicroseconds(1000);
+  }
+
+  voltage = sum / (float)500;
+  voltage = voltage / 4096.0 * 3.3 * voltage_divider_offset; //for internal 1.1v reference
+
+  Serial.print("Battery Voltage: ");
+  Serial.println(voltage); 
+
+  //round value by two precision
+  voltage = roundf(voltage * 100) / 100;
+  tempF = roundf(tempF * 100) / 100;
+
+  if(voltage > 1 && tempF > 1)
+  {
+    if (setup_wifi())
+    {
+      client.setServer(mqtt_server, 1883);
+
+      String clientId = "ESP32-PoolTempMon-";
+      clientId += String(random(0xffff), HEX);
+
+      Serial.println();
+      Serial.print("Connecting to mqtt...");
+
+      if (client.connect(clientId.c_str(), mqtt_user, mqtt_key)) {
+        Serial.println("done");
+
+        DynamicJsonDocument doc(256);
+
+        JsonObject feeds  = doc.createNestedObject("feeds");
+        feeds["temp"] = tempF;
+        feeds["battery"] = voltage;
+
+        char buffer[256];
+        size_t n = serializeJson(doc, buffer);
+
+        if (client.publish(outTopicGroup, buffer, n)) {
+          Serial.println("Group Published");
+        }
+        else {
+          Serial.println("Group Publishing Failed");
+        }
+      }
+    }
+    
+  }
+  else
+  {
+    Serial.println("Temp or Voltage were not found");
+  }
+  
+  Serial.print("Going to sleep...");
+  esp_sleep_enable_timer_wakeup(updateInterval); // Deep-Sleep time in microseconds
+  esp_deep_sleep_start();
 }
 
+void loop() {
+}
