@@ -15,7 +15,7 @@ const char* mqtt_server = "server";
 const char* mqtt_user = "user";
 const char* mqtt_key = "key";
 const char* outTopicGroup = "topic";
-const unsigned long long updateInterval = 1ULL * 60 * 1000000;  // e.g. 15 * 60 * 1000000; for a 15-Min update interval (15-mins x 60-secs * 1000000uS)
+const unsigned long long updateInterval = 60ULL * 60 * 1000000;  // e.g. 15 * 60 * 1000000; for a 15-Min update interval (15-mins x 60-secs * 1000000uS)
 
 WiFiClient espClient;
 PubSubClient client(espClient);
@@ -31,18 +31,19 @@ bool setup_wifi()
   Serial.println(ssid);
   
   WiFi.mode(WIFI_STA);
+  WiFi.persistent(false);
   WiFi.begin(ssid, password);
   Serial.println("Starting WiFi");
   int attempts = 0;
 
   while (WiFi.status() != WL_CONNECTED) 
   {
-    if (attempts > 5)
+    if (attempts > 50)
     {
       return false;
     }
 
-    delay(500);
+    delay(200);
     Serial.print(".");
     attempts++;
   }
@@ -51,26 +52,12 @@ bool setup_wifi()
   Serial.println("WiFi connected");
   Serial.println("IP address: ");
   Serial.println(WiFi.localIP());
+
   return true;
 }
 
-void setup() 
+float readBattery()
 {
-  Serial.begin(115200);
-  Serial.println("Start");
-
-  sensor.begin();
-  Serial.println("Dallas Temperature Control Library Demo - TwoPin_DS18B20");
-
-  Serial.print("Requesting temperatures...");
-  sensor.requestTemperatures();
-  Serial.println(" done");
-
-  float tempF = sensor.getTempFByIndex(0);
-
-  Serial.print("Pool Temp F: ");
-  Serial.println(tempF); 
-
   long sum = 0;
   float voltage = 0.0;
     
@@ -81,14 +68,36 @@ void setup()
   }
 
   voltage = sum / (float)500;
-  voltage = voltage / 4096.0 * 3.3 * voltage_divider_offset; //for internal 1.1v reference
+  voltage = (voltage / 4096.0) * 3.3;
+  return voltage;
+}
 
-  Serial.print("Battery Voltage: ");
-  Serial.println(voltage); 
+float readTemperature()
+{
+  sensor.begin();
+  sensor.requestTemperatures();
+  return roundf(sensor.getTempFByIndex(0)* 100) / 100;
+}
 
-  //round value by two precision
-  voltage = roundf(voltage * 100) / 100;
-  tempF = roundf(tempF * 100) / 100;
+void setup() 
+{
+  Serial.begin(115200);
+  Serial.println("Start");
+
+  float tempF = readTemperature();
+  float voltage = readBattery();
+  
+  Serial.print("Pool Temp F: ");
+  Serial.println(tempF);
+
+  float unadjustedVoltage = roundf((voltage * 2) * 100) / 100;
+  float adjustedVoltage = roundf((voltage * voltage_divider_offset) * 100) / 100;
+
+  Serial.print("Raw Battery Voltage: ");
+  Serial.println(unadjustedVoltage); 
+
+  Serial.print("Adjusted Battery Voltage: ");
+  Serial.println(adjustedVoltage); 
 
   if(voltage > 1 && tempF > 1)
   {
@@ -109,7 +118,8 @@ void setup()
 
         JsonObject feeds  = doc.createNestedObject("feeds");
         feeds["temp"] = tempF;
-        feeds["battery"] = voltage;
+        feeds["battery"] = adjustedVoltage;
+        feeds["rawbattery"] = unadjustedVoltage;
 
         char buffer[256];
         size_t n = serializeJson(doc, buffer);
