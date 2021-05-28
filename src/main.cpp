@@ -7,45 +7,87 @@
 
 #define ONE_WIRE_BUS 2
 #define ADC_PIN 4  
-#define voltage_divider_offset 2.3050
+#define voltage_divider_offset 2.10
 
 const char* ssid = "ssid";
 const char* password = "password";
-const char* mqtt_server = "server";
-const char* mqtt_user = "user";
-const char* mqtt_key = "key";
-const char* outTopicGroup = "topic";
-const unsigned long long updateInterval = 60ULL * 60 * 1000000;  // e.g. 15 * 60 * 1000000; for a 15-Min update interval (15-mins x 60-secs * 1000000uS)
+const char* mqtt_server = "io.adafruit.com";
+const char* mqtt_user = "mqttUser";
+const char* mqtt_key = "mqttKey";
+const char* outTopicGroup = "groupTopic";
+const unsigned long long updateInterval = 60ULL * 60 * 1000000;  // e.g. 60 * 60 * 1000000; for a 1 hour update interval (60-mins x 60-secs * 1000000uS)
+bool readyToSleep = false;
+unsigned long previousMillis = 0; // last time update
+unsigned long currentMillis = 0;
+int publishAttempts = 0;
+int connectionAttempts = 0;
 
 WiFiClient espClient;
 PubSubClient client(espClient);
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensor(&oneWire);
 
+// Callback function header
+void callback(char* topic, byte* payload, unsigned int length);
+
+void callback(char* topic, byte* payload, unsigned int length) 
+{
+  Serial.println("Published Message Recieved");
+  readyToSleep = true;
+}
+
+void publish(float temp, float adjustedVoltage, float unadjustedVoltage)
+{
+  publishAttempts++;
+
+  previousMillis = currentMillis;
+
+  Serial.print("Group publish attempt ");
+  Serial.print(publishAttempts);
+  Serial.println("...");
+
+  DynamicJsonDocument doc(256);
+
+  JsonObject feeds  = doc.createNestedObject("feeds");
+  feeds["temp"] = temp;
+  feeds["battery"] = adjustedVoltage;
+  feeds["rawbattery"] = unadjustedVoltage;
+  feeds["connect"] = (connectionAttempts * (float)500) / 1000;
+  feeds["publishattempts"] = publishAttempts;
+
+  char buffer[256];
+  size_t n = serializeJson(doc, buffer);
+
+  if (client.publish(outTopicGroup, buffer, n)) {
+    Serial.println("Group Published");
+  }
+  else {
+    Serial.println("Group Publishing Failed");
+  }
+}
+
 bool setup_wifi() 
 {
-  delay(10);
+  delay(100);
   // We start by connecting to a WiFi network
   Serial.println();
   Serial.print("Connecting to ");
   Serial.println(ssid);
   
   WiFi.mode(WIFI_STA);
-  WiFi.persistent(false);
   WiFi.begin(ssid, password);
   Serial.println("Starting WiFi");
-  int attempts = 0;
 
   while (WiFi.status() != WL_CONNECTED) 
   {
-    if (attempts > 50)
+    if (connectionAttempts > 25)
     {
       return false;
     }
 
-    delay(200);
+    delay(500);
     Serial.print(".");
-    attempts++;
+    connectionAttempts++;
   }
 
   Serial.println("");
@@ -83,6 +125,7 @@ void setup()
 {
   Serial.begin(115200);
   Serial.println("Start");
+  delay(500);
 
   float tempF = readTemperature();
   float voltage = readBattery();
@@ -99,46 +142,61 @@ void setup()
   Serial.print("Adjusted Battery Voltage: ");
   Serial.println(adjustedVoltage); 
 
-  if(voltage > 1 && tempF > 1)
+  if (setup_wifi())
   {
-    if (setup_wifi())
-    {
-      client.setServer(mqtt_server, 1883);
+    client.setServer(mqtt_server, 1883);
+    client.setCallback(callback);
 
-      String clientId = "ESP32-PoolTempMon-";
-      clientId += String(random(0xffff), HEX);
+    String clientId = "ESP32-PoolTempMon-";
+    clientId += String(random(0xffff), HEX);
 
-      Serial.println();
-      Serial.print("Connecting to mqtt...");
+    Serial.println();
+    Serial.print("Connecting to mqtt...");
 
-      if (client.connect(clientId.c_str(), mqtt_user, mqtt_key)) {
-        Serial.println("done");
+    if (client.connect(clientId.c_str(), mqtt_user, mqtt_key)) {
+      Serial.println("done");
 
-        DynamicJsonDocument doc(256);
-
-        JsonObject feeds  = doc.createNestedObject("feeds");
-        feeds["temp"] = tempF;
-        feeds["battery"] = adjustedVoltage;
-        feeds["rawbattery"] = unadjustedVoltage;
-
-        char buffer[256];
-        size_t n = serializeJson(doc, buffer);
-
-        if (client.publish(outTopicGroup, buffer, n)) {
-          Serial.println("Group Published");
-        }
-        else {
-          Serial.println("Group Publishing Failed");
-        }
+      if(client.subscribe(outTopicGroup))
+      { 
+         Serial.println("Subscribed");
       }
+      else
+      {
+         Serial.println("Subscribe failed");
+      }
+
+      delay(500);
+      currentMillis = millis();
+      publish(tempF, adjustedVoltage, unadjustedVoltage);
+      Serial.print("Waiting for response...");
     }
-    
   }
   else
   {
-    Serial.println("Temp or Voltage were not found");
+    readyToSleep = true;
+  }
+
+  while(readyToSleep == false)
+  {
+    currentMillis = millis();
+    if (publishAttempts > 3)
+    {
+      break;
+    }
+
+    if((currentMillis - previousMillis) > 2000)
+    {
+      //Try to publish again
+      publish(tempF, adjustedVoltage, unadjustedVoltage);
+      Serial.print("Waiting for response...");
+    }
+
+    client.loop();
+    delay(200);
   }
   
+  client.disconnect();
+  delay(200);
   Serial.print("Going to sleep...");
   esp_sleep_enable_timer_wakeup(updateInterval); // Deep-Sleep time in microseconds
   esp_deep_sleep_start();
